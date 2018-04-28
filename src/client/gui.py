@@ -8,6 +8,7 @@ except:
     import tkMessageBox as tkmb
     import tkFileDialog as tkfd
 import json
+import socket
 import threading
 import time
 import os
@@ -165,26 +166,80 @@ class UI:
         self.infoVar.set('')
 
     def build_flamegraph(self):
-        import urllib.request
+        import socket
+        s=socket.socket()
         try:
-            d = urllib.request.urlopen('http://ipkn.me:40041').read()
+            s.connect(('ipkn.me', 40041))
         except:
             tkmb.showerror("Server offline", "server is not working now. Can't build flamegraph")
             return
+
+        s=socket.socket()
+        s.connect(('ipkn.me', 40041))
+        f = s.makefile('rwb')
+        f.write(self.bundleIdentifierVar.get().encode('utf8'))
+        f.write(b'\n')
+        f.flush()
+        print('send BI')
+        msg = f.readline().strip()
+        if msg:
+            print(msg)
+            tkmb.showerror("Server error", msg)
+            return
+        print(repr(msg))
         import zipfile
         zf = zipfile.ZipFile('upload.zip', 'w', zipfile.ZIP_DEFLATED)
         zf.write('perf.data')
         for root, dirs, files in os.walk('binary_cache'):
-            for f in files:
-                zf.write(os.path.join(root, f))
+            for fname in files:
+                zf.write(os.path.join(root, fname))
         zf.close()
-        d = urllib.request.urlopen('http://ipkn.me:40041/flamegraph', data=open('upload.zip', 'rb')).read()
-        if d:
-            file('flamegraph.svg','wb').write(d)
+        sz = os.stat('upload.zip').st_size
+        print(sz)
+        f.write(str(sz).encode('utf8'))
+        f.write(b'\n')
+        f.flush()
+        msg = f.readline().strip()
+        if msg:
+            print(msg)
+            tkmb.showerror("Server error", msg)
+            return
+        #d = urllib.request.urlopen('http://ipkn.me:40041/flamegraph', data=open('upload.zip', 'rb')).read()
+        print('upload')
+        shutil.copyfileobj(open('upload.zip','rb'), f)
+        print('upload done')
+        out_sz = int(f.readline().strip())
+        print(out_sz)
+        shutil.copyfileobj(f, open('flamegraph.svg','wb'))
+        sz = os.stat('flamegraph.svg').st_size
+        print(sz)
+        if sz != int(out_sz):
+            tkmb.showerror("Download error", 'size mismatch')
+            return
+        self.open_flamegraph()
+
+    def open_flamegraph(self):
+        import http.server
+        import socketserver
+
+        class Handler(http.server.SimpleHTTPRequestHandler):
+            def do_GET(self):
+                super().do_GET()
+                def kill_me_please(server):
+                    server.shutdown()
+                threading.Thread(target = kill_me_please, args = (httpd,)).start()
+
+
+        class MyTCPServer(socketserver.TCPServer):
+            def server_bind(self):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self.socket.bind(self.server_address)
+
+        with MyTCPServer(("localhost", 40041), Handler) as httpd:
             import webbrowser
-            webbrowser.open('flamegraph.svg')
-        else:
-            tkmb.showerror("Day limit exceeded.", "server is not working now. Can't build flamegraph")
+            webbrowser.open('http://localhost:40041/flamegraph.svg')
+            httpd.serve_forever()
+        print('done')
 
     def __init__(self, rt):
         self.running = False
@@ -272,8 +327,10 @@ class UI:
         clear_collection_btn.pack(padx=pad, pady=pad, fill=X)
         gui_btn = Button(f, text='Run simpleperf report gui', command=self.run_gui)
         gui_btn.pack(padx=pad, pady=pad, fill=X)
-        #graph_btn = Button(f, text='Build Flamegraph (*limited to build once per 23h, upload symbols to cloud server)', command=self.build_flamegraph)
-        #graph_btn.pack(padx=pad, pady=pad, fill=X)
+        graph_btn = Button(f, text='Build Flamegraph (*limited to once per 23h, upload symbols to cloud server)', command=self.build_flamegraph)
+        graph_btn.pack(padx=pad, pady=pad, fill=X)
+        open_graph_btn = Button(f, text='Open Flamegraph in browser', command=self.open_flamegraph)
+        open_graph_btn.pack(padx=pad, pady=pad, fill=X)
         self.infoVar = StringVar()
         self.state = state = Label(f, textvariable=self.infoVar)
         state.pack(padx = pad, pady=pad, fill=X)
